@@ -138,6 +138,12 @@ def _require_identifier(value: Any, where: str) -> str:
     return text
 
 
+def _require_non_empty_list(value: Any, where: str) -> list[Any]:
+    if not isinstance(value, list) or not value:
+        raise PlanError(f"{where} must be a non-empty list")
+    return value
+
+
 @dataclass(frozen=True)
 class Topology:
     """Declared Qwen4-Exp geometry."""
@@ -486,7 +492,12 @@ def _parse_scope(
 
     projections = frozenset(
         _require_str(item, f"{where}.projections[{index}]")
-        for index, item in enumerate(scope.get("projections", list(manifest_bits.projections)))
+        for index, item in enumerate(
+            _require_non_empty_list(
+                scope.get("projections", list(manifest_bits.projections)),
+                f"{where}.projections",
+            )
+        )
     )
     unsupported = sorted(projections - set(manifest_bits.projections))
     if unsupported:
@@ -496,7 +507,12 @@ def _parse_scope(
 
     bitwidths = frozenset(
         _require_int(item, f"{where}.bitwidths[{index}]")
-        for index, item in enumerate(scope.get("bitwidths", list(manifest_bits.bitwidths)))
+        for index, item in enumerate(
+            _require_non_empty_list(
+                scope.get("bitwidths", list(manifest_bits.bitwidths)),
+                f"{where}.bitwidths",
+            )
+        )
     )
     unsupported_bw = sorted(bitwidths - set(manifest_bits.bitwidths))
     if unsupported_bw:
@@ -506,7 +522,12 @@ def _parse_scope(
 
     measurements = frozenset(
         _require_str(item, f"{where}.measurements[{index}]")
-        for index, item in enumerate(scope.get("measurements", list(manifest_bits.measurements)))
+        for index, item in enumerate(
+            _require_non_empty_list(
+                scope.get("measurements", list(manifest_bits.measurements)),
+                f"{where}.measurements",
+            )
+        )
     )
     unsupported_measurements = sorted(measurements - set(manifest_bits.measurements))
     if unsupported_measurements:
@@ -682,6 +703,11 @@ def _describe(key: tuple[int, int, str, int, str]) -> str:
     )
 
 
+def measurement_matches_bitwidth(measurement: str, bitwidth: int) -> bool:
+    """Whether a W*A* measurement label can refer to this weight bitwidth."""
+    return SUPPORTED_MEASUREMENTS[measurement][0] == bitwidth
+
+
 def resolve_costs(manifest: Manifest, jobs: Sequence[Job]) -> CostResolution:
     """Match cost entries to planned candidates and record every blocking gap."""
     resolution = CostResolution()
@@ -709,6 +735,8 @@ def resolve_costs(manifest: Manifest, jobs: Sequence[Job]) -> CostResolution:
                 for projection in sorted(entry.projections):
                     for bitwidth in sorted(entry.bitwidths):
                         for measurement in sorted(entry.measurements):
+                            if not measurement_matches_bitwidth(measurement, bitwidth):
+                                continue
                             key = (
                                 layer_index,
                                 expert_index,
@@ -725,8 +753,18 @@ def resolve_costs(manifest: Manifest, jobs: Sequence[Job]) -> CostResolution:
                                 continue
                             resolution.assigned[key] = entry.index
 
+    coverage = Counter(resolution.assigned.values())
+    for entry in manifest.costs:
+        affected = coverage.get(entry.index, 0)
+        if affected == 0:
+            resolution.add_issue(
+                f"cost entry {entry.index} covers no planned measurement-compatible candidate"
+            )
+
     for job in jobs:
         for measurement in manifest.measurements:
+            if not measurement_matches_bitwidth(measurement, job.bitwidth):
+                continue
             key = (
                 job.layer_index,
                 job.expert_index,
@@ -737,7 +775,6 @@ def resolve_costs(manifest: Manifest, jobs: Sequence[Job]) -> CostResolution:
             if key not in resolution.assigned:
                 resolution.add_issue(f"missing byte-cost metadata for {_describe(key)}")
 
-    coverage = Counter(resolution.assigned.values())
     for entry in manifest.costs:
         affected = coverage.get(entry.index, 0)
         if entry.kind != EXACT_COST_KIND:
@@ -766,6 +803,8 @@ def iter_candidate_rows(
     """Yield one row per planned candidate (job crossed with measurement label)."""
     for job in jobs:
         for measurement in manifest.measurements:
+            if not measurement_matches_bitwidth(measurement, job.bitwidth):
+                continue
             key = (
                 job.layer_index,
                 job.expert_index,
@@ -859,7 +898,13 @@ def build_summary(
             "measurements": len(manifest.measurements),
             "jobs": len(jobs),
             "weightstore_directories": len(directories),
-            "candidate_records": len(jobs) * len(manifest.measurements),
+            "candidate_records": sum(
+                sum(
+                    measurement_matches_bitwidth(measurement, job.bitwidth)
+                    for measurement in manifest.measurements
+                )
+                for job in jobs
+            ),
             "artifact_files": len(jobs) * 2,
         },
         "measurements": measurements,

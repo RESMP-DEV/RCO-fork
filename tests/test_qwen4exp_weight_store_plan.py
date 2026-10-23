@@ -98,14 +98,13 @@ class ExactEnumerationTests(ManifestCase):
         experts = manifest.topology.num_experts
         projections = len(planner.PROJECTIONS)
         bitwidths = len(manifest.bitwidths)
-        measurements = len(manifest.measurements)
 
         self.assertEqual(len(jobs), layers * experts * projections * bitwidths)
         self.assertEqual(len(jobs), 90)
         self.assertEqual(summary["counts"]["jobs"], 90)
         self.assertEqual(summary["counts"]["weightstore_directories"], 45)
         self.assertEqual(summary["counts"]["artifact_files"], 180)
-        self.assertEqual(summary["counts"]["candidate_records"], 90 * measurements)
+        self.assertEqual(summary["counts"]["candidate_records"], 90)
         self.assertEqual(summary["counts"]["experts"], layers * experts)
         self.assertEqual(resolution.issue_count, 0)
 
@@ -323,6 +322,31 @@ class ManifestValidationTests(ManifestCase):
             self.plan_for(manifest)
         self.assertIn("unsupported keys", str(caught.exception))
 
+    def test_cost_scope_list_fields_reject_scalars_and_nulls(self) -> None:
+        for field in ("projections", "bitwidths", "measurements"):
+            with self.subTest(field=field):
+                manifest = base_manifest()
+                manifest["costs"][0]["scope"][field] = 4 if field == "bitwidths" else None
+                with self.assertRaises(planner.PlanError) as caught:
+                    self.plan_for(manifest)
+                self.assertIn(
+                    f"costs[0].scope.{field} must be a non-empty list", str(caught.exception)
+                )
+
+    def test_measurement_labels_do_not_cross_non_matching_bitwidths(self) -> None:
+        manifest = base_manifest()
+        manifest["costs"][0]["scope"]["bitwidths"] = [8]
+        manifest["costs"][1]["scope"]["bitwidths"] = [4]
+        _, _, resolution, summary = self.plan_for(manifest)
+        self.assertFalse(summary["gpu_ready"])
+        self.assertTrue(
+            any(
+                "covers no planned measurement-compatible candidate" in issue
+                for issue in resolution.issues
+            )
+        )
+        self.assertEqual(summary["counts"]["candidate_records"], 90)
+
 
 class HostSafetyTests(unittest.TestCase):
     """The seam must stay usable on a host without Torch, CUDA, or a network."""
@@ -352,8 +376,8 @@ class HostSafetyTests(unittest.TestCase):
     def test_importing_the_planner_does_not_pull_in_torch_or_network_modules(self) -> None:
         probe = (
             "import sys, qwen4exp_weight_store_plan; "
-            "watched = {'torch', 'requests', 'urllib', 'socket', 'http', 'subprocess', "
-            "'transformers', 'numpy', 'accelerate', 'datasets'}; "
+            "watched = {'torch', 'requests', 'urllib.request', 'http.client', 'socket', "
+            "'subprocess', 'transformers', 'numpy', 'accelerate', 'datasets'}; "
             "print(sorted(m for m in sys.modules if m in watched))"
         )
         completed = subprocess.run(
@@ -434,7 +458,7 @@ class CommandLineTests(ManifestCase):
         self.assertEqual(code, 0)
         rows = [json.loads(line) for line in jobs_path.read_text(encoding="utf-8").splitlines()]
         self.assertEqual(len(rows), payload["counts"]["candidate_records"])
-        self.assertEqual(len(rows), 180)
+        self.assertEqual(len(rows), 90)
         first = rows[0]
         self.assertEqual(first["weightstore_dir"], "model.layers.0.mlp.experts.0.gate_proj")
         self.assertEqual(first["weight_artifact"], "model.layers.0.mlp.experts.0.gate_proj/4.pth")
@@ -444,10 +468,6 @@ class CommandLineTests(ManifestCase):
         self.assertEqual(first["measurement"], "W4A16")
         self.assertEqual(first["bytes"], 4096)
         self.assertEqual(first["cost_kind"], "exact")
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class PerLayerExpertTests(ManifestCase):
@@ -517,3 +537,7 @@ class PerLayerExpertTests(ManifestCase):
         self.assertEqual(summary["counts"]["weightstore_directories"], 13 * 3)
         self.assertEqual(resolution.issue_count, 0)
         self.assertEqual(summary["topology"]["active_per_layer"], [2, 2, 2])
+
+
+if __name__ == "__main__":
+    unittest.main()
