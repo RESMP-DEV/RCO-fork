@@ -1,0 +1,52 @@
+{
+  "agent": "Codex parent with MiniMax implementation worker",
+  "checks": [
+    {
+      "command": "python3 -m unittest discover -s tests -t tests -v",
+      "exit": 0,
+      "result": "38 tests passed, including direct script execution"
+    },
+    {
+      "command": "python3 -m py_compile qwen4exp_weight_store_plan.py tests/test_qwen4exp_weight_store_plan.py",
+      "exit": 0,
+      "result": "passed"
+    },
+    {
+      "command": "ruff check and format on the planner and tests",
+      "exit": 0,
+      "result": "passed"
+    },
+    {
+      "command": "host-safety import probe",
+      "exit": 0,
+      "result": "module import pulls neither torch nor network modules"
+    },
+    {
+      "command": "synthetic 48x512x10, bitwidth 4, W4A16+W4A4 scale check",
+      "exit": 0,
+      "result": "73728 jobs, 73728 WeightStore directories, 147456 artifacts, 0 blocking issues; nominal variant exits 1"
+    }
+  ],
+  "implemented": [
+    "Topology validation for uniform and per-layer expert/active counts",
+    "Exactly three gate/up/down jobs for every selected layer-expert-bitwidth-measurement",
+    "Expected WeightStore directories and fake-quant/qparams artifact paths",
+    "W4A16 and W4A4 labels with their four-bit weight contract",
+    "Exact byte-cost coverage with source provenance; nominal costs fail closed",
+    "Plan and check verbs only, with execute refused",
+    "Scope list validation and measurement-label/bitwidth compatibility"
+  ],
+  "non_claims": [
+    "No GPTQ, CUDA, model load, checkpoint payload, download, or network call ran.",
+    "GPU-ready means exact byte-cost metadata only; it is not permission to run an optimizer.",
+    "The planner does not prove candidate artifacts exist or that declared bytes match them.",
+    "The fused Qwen4Exp 3D tensors still need a GPTQ-side unfusing implementation before actual candidate generation."
+  ],
+  "recorded_at": "2026-10-23T20:40:00Z",
+  "schema": "resmp-rco-work-evidence-v1",
+  "source_dirty": true,
+  "source_revision": "9a1e09c07d468109cbe60a1b87d5036034a79d10",
+  "task": "Add a fail-closed Qwen4Exp RCO WeightStore candidate planner",
+  "updated_at": "2026-10-23T20:52:00Z",
+  "worker_receipt": "20261023-131009-0g0sqp__"
+}

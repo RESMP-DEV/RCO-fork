@@ -62,6 +62,10 @@ rco-release/
   rco_search_quant.py     RCO mixed-precision quantization search.
   rco_search_prune.py     RCO MoE expert-pruning search.
   run_build_checkpoint.py Materialize a quant / prune HF checkpoint.
+  qwen4exp_weight_store_plan.py
+                          Host-safe planning seam: enumerate the per-expert
+                          candidate jobs and the expected WeightStore paths
+                          for a Qwen4-Exp candidate store.
 
   scripts/                Shell wrappers with paper-default flags for each
                           of the five top-level Python entry points.
@@ -104,6 +108,7 @@ rco-release/
 | rco_search_quant.py     | Search      | <layer-dir>, HF model          | assignment.json (per-layer bitwidth)              |
 | rco_search_prune.py     | Search      | HF model + calibration data    | mask.pt (per-layer expert keep/prune)             |
 | run_build_checkpoint.py | Materialize | assignment.json or mask.pt     | HF checkpoint (bf16, packed, or pruned)           |
+| qwen4exp_weight_store_plan.py | Plan | topology/config manifest | candidate job list + expected WeightStore paths |
 
 Each script also has a shell wrapper under scripts/ with the paper's default flags; the wrappers all forward to the Python entry point.
 
@@ -197,6 +202,72 @@ or auto-apply by pointing PYTHONPATH at loaders/ (sitecustomize.py picks it up):
 ```bash
 PYTHONPATH=loaders vllm serve <path-to-pruned-checkpoint>
 ```
+
+## Qwen4-Exp candidate-store planning seam
+
+Qwen4-Exp ships its routed experts as fused 3-D parameters, so the per-layer
+GPTQ database that `rco_search_quant.py` reads has to be produced one unfused
+expert projection at a time. `qwen4exp_weight_store_plan.py` turns a compact
+JSON topology/config manifest into the exact list of those jobs and the
+WeightStore directory names they must produce.
+
+The seam is dry-run only and host-safe: it never imports Torch, never opens a
+checkpoint, never runs GPTQ or CUDA, never downloads, and never contacts the
+network. It needs nothing beyond the standard library. Its output is a
+planning receipt, not permission to run an optimizer.
+
+```bash
+# enumerate the candidate jobs and the expected WeightStore paths
+python3 qwen4exp_weight_store_plan.py plan --manifest manifest.json
+
+# fail-closed GPU-readiness gate: exact byte costs are required for every
+# candidate, so nominal or missing costs fail
+python3 qwen4exp_weight_store_plan.py check --manifest manifest.json
+```
+
+Manifest (format `qwen4exp-weight-store-plan-v1`):
+
+```json
+{
+  "format": "qwen4exp-weight-store-plan-v1",
+  "model": "Qwen/Qwen3.8-Flash-Next",
+  "candidate_store": "/data/qwen4exp_candidates",
+  "topology": {
+    "num_layers": 48,
+    "num_experts": 512,
+    "num_experts_per_tok": 10,
+    "hidden_size": 2560,
+    "moe_intermediate_size": 640
+  },
+  "selection": {"layers": "all", "experts": "all"},
+  "bitwidths": [4],
+  "measurements": ["W4A16", "W4A4"],
+  "cost_model": "exact",
+  "costs": [
+    {
+      "scope": {"layers": "all", "experts": "all",
+                "projections": ["gate_proj", "up_proj", "down_proj"],
+                "bitwidths": [4], "measurements": ["W4A16"]},
+      "kind": "exact",
+      "bytes": 844800,
+      "source": "gguf tensor bytes"
+    }
+  ]
+}
+```
+
+Every job produces one WeightStore directory named
+`model.layers.<layer>.mlp.experts.<expert>.<projection>` holding the
+`<bitwidth>.pth` fake-quant tensor that the search reads and the
+`<bitwidth>_qparams.pt` sidecar that the checkpoint packers consume.
+`plan --emit-jobs jobs.jsonl` writes one JSON line per candidate. Both verbs
+exit non-zero unless every planned candidate carries exact artifact byte-cost
+metadata: a cost entry with `"kind": "nominal"`, a missing byte count, a
+missing source, or an uncovered candidate fails closed.
+
+The planner does not prove that any candidate artifact exists on disk, that
+the declared byte costs match a real file, or that an optimizer run is
+allowed.
 
 ## qparams sidecar format
 
